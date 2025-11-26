@@ -1,0 +1,185 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { DesignElement } from '../types';
+
+interface DraggableElementProps {
+  element: DesignElement;
+  canvasWidth: number;
+  canvasHeight: number;
+  onUpdate: (id: string, updates: Partial<DesignElement>) => void;
+  isSelected?: boolean;
+  onSelect?: () => void;
+}
+
+export const DraggableElement: React.FC<DraggableElementProps> = ({
+  element,
+  canvasWidth,
+  canvasHeight,
+  onUpdate,
+  isSelected,
+  onSelect,
+}) => {
+  // Local state for smooth dragging/resizing before committing to parent
+  const [position, setPosition] = useState({ x: element.x, y: element.y });
+  const [isDragging, setIsDragging] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [initialResizeData, setInitialResizeData] = useState<{ 
+    width: number; 
+    height: number; 
+    mouseX: number; 
+    mouseY: number;
+    fontSize: number;
+  } | null>(null);
+
+  const elementRef = useRef<HTMLDivElement>(null);
+
+  // Sync state with props when not interacting
+  useEffect(() => {
+    if (!isDragging && !isResizing) {
+      setPosition({ x: element.x, y: element.y });
+    }
+  }, [element.x, element.y, isDragging, isResizing]);
+
+  // --- Drag Logic ---
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (isResizing) return; // Don't drag if resizing
+    e.stopPropagation();
+    if (onSelect) onSelect();
+    
+    if (elementRef.current) {
+      const rect = elementRef.current.getBoundingClientRect();
+      setDragOffset({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      });
+    }
+    setIsDragging(true);
+  };
+
+  // --- Resize Logic ---
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault(); // Prevent text selection
+    if (onSelect) onSelect();
+    
+    setIsResizing(true);
+    
+    const currentWidth = elementRef.current?.offsetWidth || 0;
+    const currentHeight = elementRef.current?.offsetHeight || 0;
+    const currentFontSize = element.type === 'text' 
+      ? parseInt(element.style?.fontSize as string || '48', 10) 
+      : 0;
+
+    setInitialResizeData({
+      width: currentWidth,
+      height: currentHeight,
+      mouseX: e.clientX,
+      mouseY: e.clientY,
+      fontSize: currentFontSize
+    });
+  };
+
+  // --- Window Event Listeners ---
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      // Dragging
+      if (isDragging && elementRef.current) {
+        const parentRect = elementRef.current.offsetParent?.getBoundingClientRect();
+        if (!parentRect) return;
+
+        let newX = e.clientX - parentRect.left - dragOffset.x;
+        let newY = e.clientY - parentRect.top - dragOffset.y;
+        setPosition({ x: newX, y: newY });
+      }
+
+      // Resizing
+      if (isResizing && initialResizeData && elementRef.current) {
+        const deltaX = e.clientX - initialResizeData.mouseX;
+        // const deltaY = e.clientY - initialResizeData.mouseY; // We assume uniform scaling based on width
+
+        if (element.type === 'logo') {
+          // Resize Image
+          const newWidth = Math.max(20, initialResizeData.width + deltaX);
+          // We don't commit immediately to avoid excessive re-renders, but for this demo we'll commit on mouseUp
+          // For visual feedback, we could use a local ref, but let's just use the final update for simplicity.
+          // Actually, to see it resize, we need to update.
+           onUpdate(element.id, { width: newWidth });
+        } else if (element.type === 'text') {
+           // Resize Text (Scale Font Size)
+           const scaleFactor = (initialResizeData.width + deltaX) / initialResizeData.width;
+           const newFontSize = Math.max(12, Math.round(initialResizeData.fontSize * scaleFactor));
+           onUpdate(element.id, { 
+             style: { ...element.style, fontSize: `${newFontSize}px` } 
+           });
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (isDragging) {
+        setIsDragging(false);
+        onUpdate(element.id, { x: position.x, y: position.y });
+      }
+      if (isResizing) {
+        setIsResizing(false);
+        setInitialResizeData(null);
+      }
+    };
+
+    if (isDragging || isResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, isResizing, dragOffset, initialResizeData, element.id, onUpdate, element.type]);
+
+  return (
+    <div
+      ref={elementRef}
+      style={{
+        position: 'absolute',
+        left: position.x,
+        top: position.y,
+        cursor: isDragging ? 'grabbing' : 'grab',
+        zIndex: isSelected ? 50 : 10,
+        userSelect: 'none',
+        touchAction: 'none',
+        width: element.type === 'logo' ? element.width : 'auto', // Important for image resizing
+      }}
+      className={`group ${isSelected ? 'ring-1 ring-blue-500 ring-offset-1 ring-offset-transparent' : 'hover:ring-1 hover:ring-zinc-400 hover:ring-dashed'}`}
+      onMouseDown={handleMouseDown}
+    >
+      {/* Content */}
+      {element.type === 'text' ? (
+        <div style={element.style} className="whitespace-pre-wrap p-2 leading-tight">
+          {element.content}
+        </div>
+      ) : (
+        <img
+          src={element.content}
+          alt="Logo"
+          className="pointer-events-none select-none w-full h-auto"
+        />
+      )}
+
+      {/* Resize Anchors (Only when selected) */}
+      {isSelected && (
+        <>
+          {/* Bottom Right Anchor - The standard resize handle */}
+          <div
+            className="absolute -bottom-1.5 -right-1.5 w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-nwse-resize z-50 shadow-sm hover:scale-110 transition-transform"
+            onMouseDown={handleResizeStart}
+          />
+          {/* Helper label */}
+          <div className="absolute -top-6 left-0 bg-blue-600 text-white text-[10px] px-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+            {element.type === 'text' ? 'Drag corner to resize text' : 'Drag to resize'}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};

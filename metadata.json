@@ -1,0 +1,5 @@
+{
+  "name": "CanvasAI Composer",
+  "description": "A smart design tool that uses Gemini to analyze your background image and suggest the optimal font styles, colors, and layout for your text and logo.",
+  "requestFramePermissions": []
+}
