@@ -306,18 +306,7 @@ const App: React.FC = () => {
   };
 
   const handleUpdateElement = useCallback((id: string, updates: Partial<DesignElement>) => {
-    // We only update history if the values actually change significantly,
-    // but DraggableElement only calls this on mouse up, so it's a discrete event.
-    // However, we need to be careful not to create a loop if we used useEffect.
-    // Here, we just assume any call to this update handler is a user action.
-    
-    // NOTE: Accessing state in callback might be stale if not careful, 
-    // but since we update elements via functional update, we need to save *current* elements to history first.
     setHistory(prevHistory => {
-        // We use a functional update for history to ensure we have the latest history
-        // But we need the *current* elements before the update.
-        // This is tricky inside a callback. 
-        // Simplest way: The component re-renders, 'elements' is fresh.
         return [...prevHistory, elements];
     });
     setRedoStack([]);
@@ -336,7 +325,7 @@ const App: React.FC = () => {
     setSelectedElementId(null);
     
     // Allow state to propagate (removing resize handles)
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await new Promise(resolve => setTimeout(resolve, 200));
 
     try {
       return await html2canvas(element, {
@@ -405,23 +394,22 @@ const App: React.FC = () => {
     setIsDownloading(true);
     setIsTransparentMode(true); // Switch to transparent mode
 
-    const originalElements = [...elements];
-    // Filter to show only text elements
-    setElements(elements.filter(e => e.type === 'text'));
+    // We do NOT filter by type here anymore. We want everything that is not the background.
+    // This includes AI Stickers, AI Text Art, etc.
+    // The "Text Only" button essentially behaves as "Download Overlay / Transparent Design".
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 250));
       const canvas = await performCapture(downloadScale, true); 
       if (canvas) {
         const link = document.createElement('a');
-        link.download = `text-overlay-${dimensions.width}x${dimensions.height}.png`;
+        link.download = `design-overlay-${dimensions.width}x${dimensions.height}.png`;
         link.href = canvas.toDataURL('image/png');
         link.click();
       }
     } catch (error) {
-      console.error("Text download failed:", error);
+      console.error("Overlay download failed:", error);
     } finally {
-      setElements(originalElements); // Restore
       setIsTransparentMode(false); 
       setIsDownloading(false);
     }
@@ -444,28 +432,30 @@ const App: React.FC = () => {
         zip.file("logo.png", dataURLToBlob(logoImage));
       }
 
-      // 3. Generate Text/Art Only Layer (Transparent)
+      // 3. Generate Overlay Layer (All elements, transparent bg)
       if (elements.length > 0) {
         setIsTransparentMode(true);
-        const originalElements = [...elements];
-        // For text overlay in zip, usually users want text + stickers, excluding background.
-        // Let's filter for text type for consistency with "Text Only" button, 
-        // OR we could just output everything on transparent bg. 
-        // Based on "text-overlay" naming, let's keep it strictly text.
-        setElements(elements.filter(e => e.type === 'text'));
-
-        await new Promise(resolve => setTimeout(resolve, 200)); // Wait for render
-        const textCanvas = await performCapture(downloadScale, true);
-        if (textCanvas) {
-           zip.file("text-overlay.png", dataURLToBlob(textCanvas.toDataURL('image/png')));
-        }
+        // We do NOT filter by type here anymore. We want the full overlay.
         
-        setElements(originalElements); // Restore
-        setIsTransparentMode(false); // Restore
-        await new Promise(resolve => setTimeout(resolve, 100)); // Wait for render restore
+        await new Promise(resolve => setTimeout(resolve, 250)); // Wait for render
+        const overlayCanvas = await performCapture(downloadScale, true);
+        if (overlayCanvas) {
+           zip.file("design-overlay.png", dataURLToBlob(overlayCanvas.toDataURL('image/png')));
+        }
+        setIsTransparentMode(false);
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
 
-      // 4. Generate Full Composite Design
+      // 4. Save Individual Assets (AI Stickers / Text Art / Uploaded URL Images)
+      // This satisfies "separate download" for individual AI elements
+      elements.forEach((el, index) => {
+        if (el.type === 'image' && el.content.startsWith('data:image')) {
+            // It's a generated or uploaded base64 image
+            zip.file(`assets/element-${index + 1}.png`, dataURLToBlob(el.content));
+        }
+      });
+
+      // 5. Generate Full Composite Design
       const fullCanvas = await performCapture(downloadScale, false);
       if (fullCanvas) {
         zip.file("full-design.png", dataURLToBlob(fullCanvas.toDataURL('image/png')));
@@ -871,7 +861,7 @@ const App: React.FC = () => {
                 title="Download text overlay/art only (Transparent PNG)"
               >
                 <FileType className="w-4 h-4" />
-                <span>Text Only</span>
+                <span>Text/Overlay Only</span>
               </button>
 
               <button 

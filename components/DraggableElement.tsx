@@ -171,6 +171,7 @@ export const DraggableElement: React.FC<DraggableElementProps> = ({
         <img
           src={element.content}
           alt={element.type}
+          crossOrigin="anonymous" 
           className="pointer-events-none w-full h-auto block"
         />
       )}
