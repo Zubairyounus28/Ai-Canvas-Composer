@@ -9,7 +9,7 @@ interface CanvasEditorProps {
   onUpdateElement: (id: string, updates: Partial<DesignElement>) => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
-  textOnlyMode?: boolean;
+  transparentBackground?: boolean;
 }
 
 export const CanvasEditor: React.FC<CanvasEditorProps> = ({
@@ -19,7 +19,7 @@ export const CanvasEditor: React.FC<CanvasEditorProps> = ({
   onUpdateElement,
   selectedId,
   onSelect,
-  textOnlyMode = false,
+  transparentBackground = false,
 }) => {
   return (
     <div className="relative overflow-auto p-8 bg-zinc-900/50 rounded-xl border border-zinc-800 flex justify-center items-center shadow-inner min-h-[500px]">
@@ -29,25 +29,22 @@ export const CanvasEditor: React.FC<CanvasEditorProps> = ({
         style={{
           width: dimensions.width,
           height: dimensions.height,
-          // In textOnlyMode, we remove background image and color to ensure transparency
-          backgroundImage: !textOnlyMode && backgroundImage ? `url(${backgroundImage})` : 'none',
+          // In transparentBackground mode, we remove background image and color to ensure transparency
+          backgroundImage: !transparentBackground && backgroundImage ? `url(${backgroundImage})` : 'none',
           backgroundSize: 'cover',
           backgroundPosition: 'center',
-          backgroundColor: textOnlyMode ? 'transparent' : (backgroundImage ? 'transparent' : '#e5e5e5'),
-          boxShadow: textOnlyMode ? 'none' : undefined, 
+          backgroundColor: transparentBackground ? 'transparent' : (backgroundImage ? 'transparent' : '#e5e5e5'),
+          boxShadow: transparentBackground ? 'none' : undefined, 
         }}
         onClick={() => onSelect(null)}
       >
-        {!backgroundImage && !textOnlyMode && (
+        {!backgroundImage && !transparentBackground && (
            <div className="absolute inset-0 flex items-center justify-center text-zinc-400 font-medium">
              Upload a background to start
            </div>
         )}
 
         {elements.map((el) => {
-          // In textOnlyMode, hide anything that isn't text
-          if (textOnlyMode && el.type !== 'text') return null;
-
           return (
             <DraggableElement
               key={el.id}

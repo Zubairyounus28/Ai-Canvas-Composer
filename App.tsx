@@ -68,7 +68,7 @@ const App: React.FC = () => {
   
   // Download Options
   const [downloadScale, setDownloadScale] = useState(1);
-  const [isTextOnlyMode, setIsTextOnlyMode] = useState(false);
+  const [isTransparentMode, setIsTransparentMode] = useState(false);
 
   // --- Handlers ---
 
@@ -115,7 +115,31 @@ const App: React.FC = () => {
     if (e.target.files?.[0]) {
       const file = e.target.files[0];
       const url = await fileToDataUrl(file);
-      setLogoImage(url);
+      
+      saveHistory(); // Save state before adding logo
+      setLogoImage(url); // Store for potential AI use
+
+      // Add logo to canvas immediately
+      setElements(prev => {
+        const existingLogo = prev.find(el => el.type === 'logo');
+        if (existingLogo) {
+          // Update content of existing logo
+          setSelectedElementId(existingLogo.id);
+          return prev.map(el => el.type === 'logo' ? { ...el, content: url } : el);
+        } else {
+          // Add new logo
+          const newLogo: DesignElement = {
+            id: 'main-logo',
+            type: 'logo',
+            content: url,
+            x: dimensions.width - 180, // Default top-rightish
+            y: 30,
+            width: 150,
+          };
+          setSelectedElementId(newLogo.id);
+          return [...prev, newLogo];
+        }
+      });
     }
   };
 
@@ -220,7 +244,7 @@ const App: React.FC = () => {
         }
       });
 
-      // Add Logo Element if uploaded and not present
+      // Add Logo Element if uploaded and not present (and we haven't manually added it already)
       if (logoImage && !filteredElements.some(el => el.type === 'logo')) {
         const logoPos = getCoordinatesFromPosition(result.suggestedLogoPosition, dimensions.width, dimensions.height, 100, 100);
         filteredElements.push({
@@ -350,9 +374,10 @@ const App: React.FC = () => {
     if (isDownloading || !selectedElementId) return;
     
     setIsDownloading(true);
-    setIsTextOnlyMode(true); // Reuse this flag to hide bg
+    setIsTransparentMode(true); // Reuse this flag to hide bg
     
     const originalElements = [...elements];
+    // Filter to isolate the selected element
     setElements(elements.filter(e => e.id === selectedElementId));
     
     try {
@@ -369,7 +394,7 @@ const App: React.FC = () => {
        console.error(error);
     } finally {
       setElements(originalElements); // Restore
-      setIsTextOnlyMode(false);
+      setIsTransparentMode(false);
       setIsDownloading(false);
     }
   };
@@ -378,7 +403,11 @@ const App: React.FC = () => {
     if (isDownloading || elements.length === 0) return;
     
     setIsDownloading(true);
-    setIsTextOnlyMode(true); // Switch to text only mode (hides bg/logo)
+    setIsTransparentMode(true); // Switch to transparent mode
+
+    const originalElements = [...elements];
+    // Filter to show only text elements
+    setElements(elements.filter(e => e.type === 'text'));
 
     try {
       await new Promise(resolve => setTimeout(resolve, 200));
@@ -392,7 +421,8 @@ const App: React.FC = () => {
     } catch (error) {
       console.error("Text download failed:", error);
     } finally {
-      setIsTextOnlyMode(false); 
+      setElements(originalElements); // Restore
+      setIsTransparentMode(false); 
       setIsDownloading(false);
     }
   };
@@ -416,13 +446,22 @@ const App: React.FC = () => {
 
       // 3. Generate Text/Art Only Layer (Transparent)
       if (elements.length > 0) {
-        setIsTextOnlyMode(true); // Hide bg for capture
+        setIsTransparentMode(true);
+        const originalElements = [...elements];
+        // For text overlay in zip, usually users want text + stickers, excluding background.
+        // Let's filter for text type for consistency with "Text Only" button, 
+        // OR we could just output everything on transparent bg. 
+        // Based on "text-overlay" naming, let's keep it strictly text.
+        setElements(elements.filter(e => e.type === 'text'));
+
         await new Promise(resolve => setTimeout(resolve, 200)); // Wait for render
         const textCanvas = await performCapture(downloadScale, true);
         if (textCanvas) {
            zip.file("text-overlay.png", dataURLToBlob(textCanvas.toDataURL('image/png')));
         }
-        setIsTextOnlyMode(false); // Restore
+        
+        setElements(originalElements); // Restore
+        setIsTransparentMode(false); // Restore
         await new Promise(resolve => setTimeout(resolve, 100)); // Wait for render restore
       }
 
@@ -444,7 +483,7 @@ const App: React.FC = () => {
       console.error("Zip generation failed:", error);
       alert("Failed to create ZIP package.");
     } finally {
-      setIsTextOnlyMode(false);
+      setIsTransparentMode(false);
       setIsDownloading(false);
     }
   };
@@ -806,7 +845,7 @@ const App: React.FC = () => {
             onUpdateElement={handleUpdateElement}
             selectedId={selectedElementId}
             onSelect={setSelectedElementId}
-            textOnlyMode={isTextOnlyMode}
+            transparentBackground={isTransparentMode}
           />
 
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-zinc-900 p-4 rounded-b-xl border border-zinc-800 border-t-0">
