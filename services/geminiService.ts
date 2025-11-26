@@ -1,18 +1,22 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { FontStyle, AIAnalysisResult } from "../types";
+import { AIAnalysisResult } from "../types";
 
 const genAI = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const analysisSchema: Schema = {
+const designSchema: Schema = {
   type: Type.OBJECT,
   properties: {
+    textContent: {
+      type: Type.STRING,
+      description: "Creative, short, punchy headline or text content generated based on the user's prompt (max 6-8 words).",
+    },
     textColor: {
       type: Type.STRING,
       description: "Optimal CSS hex color for text to ensure readability against the background.",
     },
     fontFamily: {
       type: Type.STRING,
-      description: "Recommended CSS font-family value based on the requested style (e.g., 'Great Vibes', 'Oswald', 'Inter').",
+      description: "Recommended CSS font-family value. Choose based on the mood: 'Great Vibes' (Elegant/Script), 'Oswald' (Bold/Impact), 'Inter' (Modern), 'Playfair Display' (Classic), 'Roboto Mono' (Tech).",
     },
     textShadow: {
       type: Type.STRING,
@@ -30,55 +34,51 @@ const analysisSchema: Schema = {
     },
     fontReasoning: {
       type: Type.STRING,
-      description: "Short explanation of why these styles and positions were chosen.",
+      description: "Short explanation of the design choices.",
     }
   },
-  required: ["textColor", "fontFamily", "textShadow", "suggestedTextPosition", "suggestedLogoPosition", "fontReasoning"],
+  required: ["textContent", "textColor", "fontFamily", "textShadow", "suggestedTextPosition", "suggestedLogoPosition", "fontReasoning"],
 };
 
-export const analyzeImageAndSuggestStyle = async (
+export const generateDesign = async (
   imageBase64: string,
-  userText: string,
-  stylePref: FontStyle
+  userPrompt: string,
+  styleImageBase64?: string | null
 ): Promise<AIAnalysisResult> => {
   try {
-    const prompt = `
-      You are an expert graphic designer.
-      Analyze the provided background image.
-      I need to overlay the text "${userText}" and a company logo on this image.
+    let promptText = `
+      You are an expert graphic designer and copywriter.
+      Analyze the provided background image (first image).
       
-      The user prefers a "${stylePref}" font style.
+      User Request: "${userPrompt}"
       
       Tasks:
-      1. Determine the best font color (hex) for high contrast.
-      2. Choose a specific font-family from this list that matches the "${stylePref}" style and image vibe:
-         - 'Great Vibes', cursive (for Script)
-         - 'Oswald', sans-serif (for Bold/Impact)
-         - 'Inter', sans-serif (for Modern/Regular)
-         - 'Playfair Display', serif (for Elegant/Classic)
-         - 'Roboto Mono', monospace (for Tech/Mono)
-      3. Suggest a text-shadow if needed for readability.
-      4. Find the best "negative space" or empty area in the image to place the text so it doesn't cover faces or main subjects.
-      5. Suggest a balanced position for the logo.
+      1. Write a creative, short headline or slogan based on the User Request.
+      2. Choose the best font style (Script, Bold, Modern, etc.) that matches the text and image vibe.
+      3. Determine the best font color (hex) for high contrast.
+      4. Suggest a text-shadow if needed.
+      5. Find the best "negative space" in the image to place the text.
+      6. Suggest a balanced position for a logo.
     `;
+
+    const parts: any[] = [
+      { inlineData: { mimeType: "image/jpeg", data: imageBase64 } }
+    ];
+
+    if (styleImageBase64) {
+      promptText += "\nAlso, analyze the second image provided (Style Reference). Try to match the font style (serif/sans/script) and color palette from this reference image in your suggestions.";
+      parts.push({ inlineData: { mimeType: "image/jpeg", data: styleImageBase64 } });
+    }
+
+    parts.push({ text: promptText });
 
     const response = await genAI.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: "image/jpeg", // Assuming JPEG/PNG, the API is flexible with common image types
-              data: imageBase64,
-            },
-          },
-          { text: prompt },
-        ],
-      },
+      contents: { parts },
       config: {
         responseMimeType: "application/json",
-        responseSchema: analysisSchema,
-        temperature: 0.4, // Lower temperature for more consistent design rules
+        responseSchema: designSchema,
+        temperature: 0.5, 
       },
     });
 
@@ -88,9 +88,9 @@ export const analyzeImageAndSuggestStyle = async (
     return JSON.parse(text) as AIAnalysisResult;
 
   } catch (error) {
-    console.error("Gemini Analysis Error:", error);
-    // Fallback if AI fails
+    console.error("Gemini Design Error:", error);
     return {
+      textContent: userPrompt || "New Design",
       textColor: "#ffffff",
       fontFamily: "Inter, sans-serif",
       textShadow: "0px 2px 4px rgba(0,0,0,0.5)",
@@ -101,15 +101,60 @@ export const analyzeImageAndSuggestStyle = async (
   }
 };
 
-export const generateCreativeCopy = async (prompt: string): Promise<string> => {
+export const generateSticker = async (prompt: string): Promise<string | null> => {
   try {
-    const result = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: `Write a short, punchy, and creative marketing headline or slogan (max 8 words) based on this topic/prompt: "${prompt}". Return ONLY the text, no quotes or explanations.`,
+    const response = await genAI.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [
+          {
+            text: `Generate a high quality, isolated sticker-style illustration of: ${prompt}. The background must be SOLID WHITE. Do NOT use transparency pattern/checkerboard.`,
+          },
+        ],
+      },
     });
-    return result.text?.trim() || prompt;
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
   } catch (error) {
-    console.error("Gemini Text Gen Error:", error);
-    return prompt;
+    console.error("Gemini Image Gen Error:", error);
+    return null;
+  }
+};
+
+export const generateTypographyImage = async (prompt: string, styleImageBase64?: string | null): Promise<string | null> => {
+  try {
+    const parts: any[] = [];
+    
+    let textPrompt = `Create a high-quality, artistic typography design image for the text: "${prompt}". 
+    The text should be the main focus. 
+    CRITICAL: The background MUST be a SOLID WHITE COLOR. Do NOT generate a checkerboard or transparent pattern.
+    The style should be creative, eye-catching, and legible.`;
+
+    if (styleImageBase64) {
+      textPrompt += ` Use the provided image as a visual style reference (colors, texture, vibe) for the text effect.`;
+      parts.push({ inlineData: { mimeType: "image/jpeg", data: styleImageBase64 } });
+    }
+
+    parts.push({ text: textPrompt });
+
+    const response = await genAI.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: { parts },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Gemini Typography Error:", error);
+    return null;
   }
 };

@@ -14,16 +14,17 @@ export interface Position {
 
 export interface DesignElement {
   id: string;
-  type: 'text' | 'logo';
+  type: 'text' | 'logo' | 'image'; // Added 'image' for AI objects
   content: string; // Text content or Image URL
   x: number;
   y: number;
-  width?: number; // For logo
-  height?: number; // For logo
+  width?: number; // For images/logos
+  height?: number; 
   style?: React.CSSProperties; // For text styling
 }
 
 export interface AIAnalysisResult {
+  textContent: string; // The generated text
   textColor: string;
   fontFamily: string;
   textShadow: string;

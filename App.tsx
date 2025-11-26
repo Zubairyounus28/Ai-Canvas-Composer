@@ -1,10 +1,11 @@
 import React, { useState, useCallback } from 'react';
-import { Layout, Type, Image as ImageIcon, Wand2, Download, Upload, Move, CheckCircle2, Sparkles, Loader2, ChevronDown, FileType, Share2 } from 'lucide-react';
+import { Layout, Type, Image as ImageIcon, Wand2, Download, Upload, Move, CheckCircle2, Sparkles, Loader2, ChevronDown, FileType, Share2, MousePointer2, Sticker, Crop, MessageSquarePlus, Palette, Link, Archive, Undo, Redo, Trash2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
+import JSZip from 'jszip';
 import { CanvasEditor } from './components/CanvasEditor';
-import { analyzeImageAndSuggestStyle, generateCreativeCopy } from './services/geminiService';
-import { fileToBase64, fileToDataUrl } from './utils/helpers';
-import { CanvasDimensions, DesignElement, FontStyle, AIAnalysisResult, Position } from './types';
+import { generateDesign, generateSticker, generateTypographyImage } from './services/geminiService';
+import { fileToBase64, fileToDataUrl, removeBackground, dataURLToBlob } from './utils/helpers';
+import { CanvasDimensions, DesignElement, AIAnalysisResult, Position } from './types';
 
 // Helper to convert named positions to coordinates
 const getCoordinatesFromPosition = (
@@ -36,26 +37,70 @@ const getCoordinatesFromPosition = (
 const App: React.FC = () => {
   // --- State ---
   const [dimensions, setDimensions] = useState<CanvasDimensions>({ width: 800, height: 800 });
+  
+  // Images
   const [bgImage, setBgImage] = useState<string | null>(null);
   const [bgFile, setBgFile] = useState<File | null>(null);
   const [logoImage, setLogoImage] = useState<string | null>(null);
-  const [text, setText] = useState<string>("");
-  const [stylePref, setStylePref] = useState<FontStyle>('Bold');
-  
+  const [styleRefImage, setStyleRefImage] = useState<string | null>(null); // For style reference
+  const [styleRefFile, setStyleRefFile] = useState<File | null>(null);
+  const [imageUrlInput, setImageUrlInput] = useState(""); // For URL inputs
+
+  // Inputs
+  const [designPrompt, setDesignPrompt] = useState<string>("");
+  const [objectPrompt, setObjectPrompt] = useState("");
+
+  // Canvas State
   const [elements, setElements] = useState<DesignElement[]>([]);
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   
+  // History State
+  const [history, setHistory] = useState<DesignElement[][]>([]);
+  const [redoStack, setRedoStack] = useState<DesignElement[][]>([]);
+
+  // Loading States
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isGeneratingText, setIsGeneratingText] = useState(false);
+  const [isGeneratingObject, setIsGeneratingObject] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  // Results
   const [analysisResult, setAnalysisResult] = useState<AIAnalysisResult | null>(null);
   
+  // Download Options
   const [downloadScale, setDownloadScale] = useState(1);
-  const [isDownloading, setIsDownloading] = useState(false);
-  
-  // Controls render mode for export (standard vs text only)
   const [isTextOnlyMode, setIsTextOnlyMode] = useState(false);
 
   // --- Handlers ---
+
+  const saveHistory = useCallback(() => {
+    setHistory(prev => [...prev, elements]);
+    setRedoStack([]); // Clear redo stack on new action
+  }, [elements]);
+
+  const handleUndo = useCallback(() => {
+    if (history.length === 0) return;
+    
+    const previousState = history[history.length - 1];
+    setRedoStack(prev => [elements, ...prev]);
+    setElements(previousState);
+    setHistory(prev => prev.slice(0, -1));
+  }, [history, elements]);
+
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+
+    const nextState = redoStack[0];
+    setHistory(prev => [...prev, elements]);
+    setElements(nextState);
+    setRedoStack(prev => prev.slice(1));
+  }, [redoStack, elements]);
+
+  const handleDeleteSelected = useCallback(() => {
+    if (!selectedElementId) return;
+    saveHistory();
+    setElements(prev => prev.filter(el => el.id !== selectedElementId));
+    setSelectedElementId(null);
+  }, [selectedElementId, saveHistory]);
 
   const handleBgUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.[0]) {
@@ -74,69 +119,121 @@ const App: React.FC = () => {
     }
   };
 
-  const handleGenerateAIText = async () => {
-    if (!text) return;
-    setIsGeneratingText(true);
-    const creativeText = await generateCreativeCopy(text);
-    setText(creativeText);
-    // Also update element if it exists
-    setElements(prev => prev.map(el => el.type === 'text' ? { ...el, content: creativeText } : el));
-    setIsGeneratingText(false);
+  const handleStyleRefUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) {
+      const file = e.target.files[0];
+      setStyleRefFile(file);
+      const url = await fileToDataUrl(file);
+      setStyleRefImage(url);
+    }
   };
 
-  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newText = e.target.value;
-    setText(newText);
-    setElements(prev => prev.map(el => el.type === 'text' ? { ...el, content: newText } : el));
+  const handleInsertUrlImage = () => {
+    if (!imageUrlInput) return;
+    saveHistory();
+
+    // Basic check, though logic allows most strings as src
+    const newElement: DesignElement = {
+      id: `url-img-${Date.now()}`,
+      type: 'image',
+      content: imageUrlInput,
+      x: dimensions.width / 2 - 100,
+      y: dimensions.height / 2 - 100,
+      width: 200,
+    };
+    
+    setElements(prev => [...prev, newElement]);
+    setSelectedElementId(newElement.id);
+    setImageUrlInput(""); // Clear input
   };
 
-  const handleGenerateDesign = async () => {
-    if (!bgFile || !text) {
-      alert("Please upload a background image and enter text first.");
+  const handleGenerateAIObject = async () => {
+    if (!objectPrompt) return;
+    setIsGeneratingObject(true);
+    saveHistory();
+
+    try {
+      const stickerBase64 = await generateSticker(objectPrompt);
+      
+      if (stickerBase64) {
+        // Auto-remove background (assumes white background from prompt)
+        const transparentSticker = await removeBackground(stickerBase64);
+
+        const newElement: DesignElement = {
+          id: `ai-obj-${Date.now()}`,
+          type: 'image',
+          content: transparentSticker,
+          x: dimensions.width / 2 - 75,
+          y: dimensions.height / 2 - 75,
+          width: 150,
+        };
+        setElements(prev => [...prev, newElement]);
+        setSelectedElementId(newElement.id);
+        setObjectPrompt("");
+      } else {
+        alert("Failed to generate object. Please try again.");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error generating object.");
+    } finally {
+      setIsGeneratingObject(false);
+    }
+  };
+
+  // Generates Editable Text (JSON + CSS)
+  const handleGenerateEditableDesign = async () => {
+    if (!bgFile || !designPrompt) {
+      alert("Please upload a background image and enter a prompt.");
       return;
     }
     
     setIsAnalyzing(true);
+    saveHistory();
     
     try {
-      const base64 = await fileToBase64(bgFile);
-      const result = await analyzeImageAndSuggestStyle(base64, text, stylePref);
+      const bgBase64 = await fileToBase64(bgFile);
+      const styleBase64 = styleRefFile ? await fileToBase64(styleRefFile) : null;
+
+      // Generates text content AND style
+      const result = await generateDesign(bgBase64, designPrompt, styleBase64);
       setAnalysisResult(result);
       
-      // Create Elements based on AI suggestions
-      const newElements: DesignElement[] = [];
+      const newElements: DesignElement[] = [...elements];
 
-      // Add Text Element
+      // Remove old main text if exists to replace it
+      const filteredElements = newElements.filter(el => el.id !== 'main-text');
+
+      // Add Text Element (Generated Content)
       const textPos = getCoordinatesFromPosition(result.suggestedTextPosition, dimensions.width, dimensions.height, 300, 100);
-      newElements.push({
-        id: 'main-text',
+      filteredElements.push({
+        id: `main-text-${Date.now()}`,
         type: 'text',
-        content: text,
+        content: result.textContent,
         x: textPos.x,
         y: textPos.y,
         style: {
           color: result.textColor,
           fontFamily: result.fontFamily,
           textShadow: result.textShadow === 'none' ? undefined : result.textShadow,
-          fontSize: '64px', // Default starting size
-          fontWeight: stylePref === 'Bold' ? 700 : 400,
+          fontSize: '64px',
         }
       });
 
-      // Add Logo Element if uploaded
-      if (logoImage) {
+      // Add Logo Element if uploaded and not present
+      if (logoImage && !filteredElements.some(el => el.type === 'logo')) {
         const logoPos = getCoordinatesFromPosition(result.suggestedLogoPosition, dimensions.width, dimensions.height, 100, 100);
-        newElements.push({
+        filteredElements.push({
           id: 'main-logo',
           type: 'logo',
           content: logoImage,
           x: logoPos.x,
           y: logoPos.y,
-          width: 150, // Default logo width
+          width: 150, 
         });
       }
 
-      setElements(newElements);
+      setElements(filteredElements);
     } catch (e) {
       console.error(e);
       alert("Something went wrong with the AI analysis. Please check your API key.");
@@ -145,25 +242,88 @@ const App: React.FC = () => {
     }
   };
 
+  // Generates Text as an Image (Typography Art)
+  const handleGenerateTextArt = async () => {
+    if (!designPrompt) {
+      alert("Please enter a text prompt.");
+      return;
+    }
+
+    setIsAnalyzing(true);
+    saveHistory();
+
+    try {
+      const styleBase64 = styleRefFile ? await fileToBase64(styleRefFile) : null;
+      const imageBase64 = await generateTypographyImage(designPrompt, styleBase64);
+
+      if (imageBase64) {
+        // Auto-remove background
+        const transparentImage = await removeBackground(imageBase64);
+
+        const newElement: DesignElement = {
+          id: `text-art-${Date.now()}`,
+          type: 'image',
+          content: transparentImage,
+          x: (dimensions.width - 400) / 2,
+          y: (dimensions.height - 200) / 2,
+          width: 400, // Default width for text art
+        };
+        setElements(prev => [...prev, newElement]);
+        setSelectedElementId(newElement.id);
+      } else {
+        alert("Could not generate text art. Try a different prompt.");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error generating text art.");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   const handleUpdateElement = useCallback((id: string, updates: Partial<DesignElement>) => {
+    // We only update history if the values actually change significantly,
+    // but DraggableElement only calls this on mouse up, so it's a discrete event.
+    // However, we need to be careful not to create a loop if we used useEffect.
+    // Here, we just assume any call to this update handler is a user action.
+    
+    // NOTE: Accessing state in callback might be stale if not careful, 
+    // but since we update elements via functional update, we need to save *current* elements to history first.
+    setHistory(prevHistory => {
+        // We use a functional update for history to ensure we have the latest history
+        // But we need the *current* elements before the update.
+        // This is tricky inside a callback. 
+        // Simplest way: The component re-renders, 'elements' is fresh.
+        return [...prevHistory, elements];
+    });
+    setRedoStack([]);
+
     setElements(prev => prev.map(el => el.id === id ? { ...el, ...updates } : el));
-  }, []);
+  }, [elements]);
+
+  // --- Download Helpers ---
 
   const performCapture = async (scale: number, transparent: boolean = false) => {
     const element = document.getElementById('canvas-export-target');
     if (!element) return null;
 
     // Deselect everything to hide anchors/borders
+    const previousSelection = selectedElementId;
     setSelectedElementId(null);
     
     // Allow state to propagate (removing resize handles)
     await new Promise(resolve => setTimeout(resolve, 150));
 
-    return await html2canvas(element, {
-      scale: scale,
-      useCORS: true,
-      backgroundColor: transparent ? null : undefined, // Null ensures transparency
-    });
+    try {
+      return await html2canvas(element, {
+        scale: scale,
+        useCORS: true,
+        backgroundColor: transparent ? null : undefined, // Null ensures transparency
+      });
+    } finally {
+      // Restore selection
+      if(previousSelection) setSelectedElementId(previousSelection);
+    }
   };
 
   const handleDownload = async () => {
@@ -186,17 +346,43 @@ const App: React.FC = () => {
     }
   };
 
+  const handleDownloadSelection = async () => {
+    if (isDownloading || !selectedElementId) return;
+    
+    setIsDownloading(true);
+    setIsTextOnlyMode(true); // Reuse this flag to hide bg
+    
+    const originalElements = [...elements];
+    setElements(elements.filter(e => e.id === selectedElementId));
+    
+    try {
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      const canvas = await performCapture(downloadScale, true); // Transparent
+      if (canvas) {
+        const link = document.createElement('a');
+        link.download = `selection-${selectedElementId}.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+      }
+    } catch (error) {
+       console.error(error);
+    } finally {
+      setElements(originalElements); // Restore
+      setIsTextOnlyMode(false);
+      setIsDownloading(false);
+    }
+  };
+
   const handleDownloadTextOnly = async () => {
-    if (isDownloading || !elements.some(e => e.type === 'text')) return;
+    if (isDownloading || elements.length === 0) return;
     
     setIsDownloading(true);
     setIsTextOnlyMode(true); // Switch to text only mode (hides bg/logo)
 
     try {
-      // Wait for React to render the text-only view
       await new Promise(resolve => setTimeout(resolve, 200));
-
-      const canvas = await performCapture(downloadScale, true); // true = force transparent background
+      const canvas = await performCapture(downloadScale, true); 
       if (canvas) {
         const link = document.createElement('a');
         link.download = `text-overlay-${dimensions.width}x${dimensions.height}.png`;
@@ -206,15 +392,65 @@ const App: React.FC = () => {
     } catch (error) {
       console.error("Text download failed:", error);
     } finally {
-      setIsTextOnlyMode(false); // Restore view
+      setIsTextOnlyMode(false); 
+      setIsDownloading(false);
+    }
+  };
+
+  const handleDownloadZip = async () => {
+    if (isDownloading) return;
+    setIsDownloading(true);
+
+    try {
+      const zip = new JSZip();
+
+      // 1. Add Background Image if exists
+      if (bgImage) {
+        zip.file("background.png", dataURLToBlob(bgImage));
+      }
+
+      // 2. Add Logo Image if exists
+      if (logoImage) {
+        zip.file("logo.png", dataURLToBlob(logoImage));
+      }
+
+      // 3. Generate Text/Art Only Layer (Transparent)
+      if (elements.length > 0) {
+        setIsTextOnlyMode(true); // Hide bg for capture
+        await new Promise(resolve => setTimeout(resolve, 200)); // Wait for render
+        const textCanvas = await performCapture(downloadScale, true);
+        if (textCanvas) {
+           zip.file("text-overlay.png", dataURLToBlob(textCanvas.toDataURL('image/png')));
+        }
+        setIsTextOnlyMode(false); // Restore
+        await new Promise(resolve => setTimeout(resolve, 100)); // Wait for render restore
+      }
+
+      // 4. Generate Full Composite Design
+      const fullCanvas = await performCapture(downloadScale, false);
+      if (fullCanvas) {
+        zip.file("full-design.png", dataURLToBlob(fullCanvas.toDataURL('image/png')));
+      }
+
+      // Generate Zip Blob and Download
+      const content = await zip.generateAsync({ type: "blob" });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(content);
+      link.download = "canvas-design-package.zip";
+      link.click();
+      URL.revokeObjectURL(link.href);
+
+    } catch (error) {
+      console.error("Zip generation failed:", error);
+      alert("Failed to create ZIP package.");
+    } finally {
+      setIsTextOnlyMode(false);
       setIsDownloading(false);
     }
   };
 
   const handleShareWhatsApp = async () => {
     if (isDownloading || !bgImage) return;
-    
-    // Check if Web Share API with files is supported
     if (!navigator.canShare) {
        alert("Sharing files is not supported on this browser. Downloading image instead.");
        handleDownload();
@@ -228,7 +464,6 @@ const App: React.FC = () => {
 
       canvas.toBlob(async (blob) => {
         if (!blob) return;
-        
         const file = new File([blob], "design.png", { type: "image/png" });
         const shareData = {
           files: [file],
@@ -240,9 +475,7 @@ const App: React.FC = () => {
           try {
             await navigator.share(shareData);
           } catch (shareError) {
-             if ((shareError as Error).name !== 'AbortError') {
-               console.error('Share failed', shareError);
-             }
+             if ((shareError as Error).name !== 'AbortError') console.error('Share failed', shareError);
           }
         } else {
           alert("Your device doesn't support sharing this image directly. Downloading instead.");
@@ -257,6 +490,8 @@ const App: React.FC = () => {
       setIsDownloading(false);
     }
   };
+
+  const selectedElement = elements.find(el => el.id === selectedElementId);
 
   // --- Render ---
 
@@ -281,7 +516,7 @@ const App: React.FC = () => {
       <main className="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         
         {/* Left Sidebar: Controls */}
-        <div className="lg:col-span-4 space-y-8 h-fit">
+        <div className="lg:col-span-4 space-y-6 h-fit">
           
           {/* Section 1: Setup */}
           <section className="space-y-4 p-5 bg-zinc-900 rounded-xl border border-zinc-800 shadow-sm">
@@ -291,7 +526,7 @@ const App: React.FC = () => {
             
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="text-xs font-medium text-zinc-400 block mb-1">Width (px)</label>
+                <label className="text-xs font-medium text-zinc-400 block mb-1">Width</label>
                 <input 
                   type="number" 
                   value={dimensions.width}
@@ -300,7 +535,7 @@ const App: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium text-zinc-400 block mb-1">Height (px)</label>
+                <label className="text-xs font-medium text-zinc-400 block mb-1">Height</label>
                 <input 
                   type="number" 
                   value={dimensions.height}
@@ -310,108 +545,223 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-medium text-zinc-400 block mb-1">Background Image</label>
-                <label className="flex items-center justify-center w-full h-16 border-2 border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-indigo-500 hover:bg-zinc-800/50 transition-colors group">
-                  <div className="flex items-center gap-2 text-zinc-500 group-hover:text-indigo-400">
-                    <ImageIcon className="w-4 h-4" />
-                    <span className="text-sm">{bgImage ? 'Change Image' : 'Upload Image'}</span>
-                  </div>
-                  <input type="file" className="hidden" accept="image/*" onChange={handleBgUpload} />
-                </label>
-              </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex flex-col items-center justify-center p-3 border border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-indigo-500 hover:bg-zinc-800/50 transition-colors">
+                <ImageIcon className="w-5 h-5 mb-1 text-zinc-500" />
+                <span className="text-xs text-zinc-400">{bgImage ? 'Change Bg' : 'Add Background'}</span>
+                <input type="file" className="hidden" accept="image/*" onChange={handleBgUpload} />
+              </label>
 
-              <div>
-                <label className="text-xs font-medium text-zinc-400 block mb-1">Logo (Optional)</label>
-                <label className="flex items-center justify-center w-full h-16 border-2 border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-indigo-500 hover:bg-zinc-800/50 transition-colors group">
-                  <div className="flex items-center gap-2 text-zinc-500 group-hover:text-indigo-400">
-                    <Upload className="w-4 h-4" />
-                    <span className="text-sm">{logoImage ? 'Change Logo' : 'Upload Logo'}</span>
-                  </div>
-                  <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
-                </label>
+              <label className="flex flex-col items-center justify-center p-3 border border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-indigo-500 hover:bg-zinc-800/50 transition-colors">
+                <Upload className="w-5 h-5 mb-1 text-zinc-500" />
+                <span className="text-xs text-zinc-400">{logoImage ? 'Change Logo' : 'Add Logo'}</span>
+                <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
+              </label>
+            </div>
+            
+            {/* Insert Image via URL */}
+            <div className="pt-2 border-t border-zinc-800">
+              <label className="text-xs font-medium text-zinc-400 block mb-2">Insert Image via URL</label>
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  placeholder="https://example.com/image.png"
+                  value={imageUrlInput}
+                  onChange={(e) => setImageUrlInput(e.target.value)}
+                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none" 
+                />
+                <button 
+                  onClick={handleInsertUrlImage}
+                  disabled={!imageUrlInput}
+                  className="bg-zinc-800 hover:bg-zinc-700 text-indigo-400 p-2 rounded border border-zinc-700 disabled:opacity-50 transition-colors"
+                  title="Add Image to Canvas"
+                >
+                  <Link className="w-4 h-4" />
+                </button>
               </div>
             </div>
           </section>
 
-          {/* Section 2: Content & Style */}
-          <section className="space-y-4 p-5 bg-zinc-900 rounded-xl border border-zinc-800 shadow-sm">
-             <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100">
-              <Type className="w-4 h-4 text-indigo-400" /> Text & Style
+          {/* Section 2: AI Text & Art Generation */}
+          <section className="space-y-4 p-5 bg-zinc-900 rounded-xl border border-zinc-800 shadow-sm relative overflow-hidden">
+             {/* Gradient Accent */}
+             <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/10 rounded-bl-full pointer-events-none" />
+             
+             <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100 relative z-10">
+              <MessageSquarePlus className="w-4 h-4 text-indigo-400" /> AI Creative Assistant
             </h2>
             
             <div>
-              <div className="flex justify-between items-center mb-1">
-                <label className="text-xs font-medium text-zinc-400">Overlay Text or Prompt</label>
-                <button 
-                  onClick={handleGenerateAIText}
-                  disabled={isGeneratingText || !text}
-                  className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                  title="Generate creative text from your input"
-                >
-                  {isGeneratingText ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                  AI Magic
-                </button>
-              </div>
+              <label className="text-xs font-medium text-zinc-400 block mb-2">
+                Prompt for Text or Style
+              </label>
               <textarea 
-                rows={3}
-                value={text}
-                onChange={handleTextChange}
-                placeholder="Enter text or a prompt (e.g., 'Coffee shop summer sale')..."
+                rows={2}
+                value={designPrompt}
+                onChange={(e) => setDesignPrompt(e.target.value)}
+                placeholder="e.g. 'Cyberpunk neon title' or 'Elegant wedding invite'"
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
               />
             </div>
 
             <div>
-              <label className="text-xs font-medium text-zinc-400 block mb-2">Preferred Font Style</label>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {(['Script', 'Bold', 'Regular', 'Modern', 'Monospace'] as FontStyle[]).map(style => (
-                  <button
-                    key={style}
-                    onClick={() => setStylePref(style)}
-                    className={`px-3 py-2 text-xs rounded border transition-all ${
-                      stylePref === style 
-                      ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-900/50' 
-                      : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
-                    }`}
-                  >
-                    {style}
-                  </button>
-                ))}
-              </div>
+              <label className="text-xs font-medium text-zinc-400 block mb-2">
+                Style Reference Image (Optional)
+              </label>
+              <label className="flex items-center gap-3 p-2 border border-dashed border-zinc-700 rounded-lg cursor-pointer hover:bg-zinc-800/50 transition-colors">
+                <div className="w-10 h-10 bg-zinc-800 rounded flex items-center justify-center border border-zinc-700">
+                  {styleRefImage ? (
+                    <img src={styleRefImage} alt="Ref" className="w-full h-full object-cover rounded" />
+                  ) : (
+                    <Palette className="w-5 h-5 text-zinc-500" />
+                  )}
+                </div>
+                <div className="flex-1">
+                   <div className="text-xs text-zinc-300">{styleRefImage ? 'Reference Loaded' : 'Upload Image for Style'}</div>
+                   <div className="text-[10px] text-zinc-500">Influences colors & font vibe</div>
+                </div>
+                <input type="file" className="hidden" accept="image/*" onChange={handleStyleRefUpload} />
+              </label>
             </div>
-          </section>
 
-          {/* Action Button */}
-          <button
-            onClick={handleGenerateDesign}
-            disabled={isAnalyzing || !bgImage || !text}
-            className={`w-full py-4 rounded-xl flex items-center justify-center gap-2 font-semibold text-white transition-all transform active:scale-95 ${
-              isAnalyzing || !bgImage || !text
-              ? 'bg-zinc-800 cursor-not-allowed text-zinc-500' 
-              : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 shadow-lg shadow-indigo-900/20'
-            }`}
-          >
-            {isAnalyzing ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span>Analyzing Image...</span>
-              </>
-            ) : (
-              <>
-                <Wand2 className="w-5 h-5" />
-                <span>Generate Composition</span>
-              </>
-            )}
-          </button>
+            <div className="grid grid-cols-2 gap-2 pt-2">
+              <button
+                onClick={handleGenerateEditableDesign}
+                disabled={isAnalyzing || !bgImage || !designPrompt}
+                className="py-2.5 px-3 rounded-lg flex flex-col items-center justify-center gap-1 font-medium text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 transition-all disabled:opacity-50"
+              >
+                {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Type className="w-4 h-4 text-indigo-400" />}
+                <span>Editable Text</span>
+              </button>
+
+              <button
+                onClick={handleGenerateTextArt}
+                disabled={isAnalyzing || !designPrompt}
+                className="py-2.5 px-3 rounded-lg flex flex-col items-center justify-center gap-1 font-medium text-xs bg-gradient-to-br from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-900/20 transition-all disabled:opacity-50"
+              >
+                {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4 text-yellow-200" />}
+                <span>Generate Text Image</span>
+              </button>
+            </div>
+            <p className="text-[10px] text-zinc-500 text-center">
+              "Editable Text" creates standard text. "Text Image" creates stylized art.
+            </p>
+          </section>
+          
+           {/* Section 3: AI Objects */}
+           <section className="space-y-4 p-5 bg-zinc-900 rounded-xl border border-zinc-800 shadow-sm">
+             <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100">
+              <Sticker className="w-4 h-4 text-pink-400" /> AI Objects
+            </h2>
+            <div className="flex gap-2">
+              <input 
+                value={objectPrompt}
+                onChange={(e) => setObjectPrompt(e.target.value)}
+                placeholder="e.g. 'retro sun', 'coffee cup'..."
+                className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-pink-500 outline-none"
+              />
+              <button 
+                onClick={handleGenerateAIObject}
+                disabled={isGeneratingObject || !objectPrompt}
+                className="bg-zinc-800 hover:bg-zinc-700 text-pink-400 p-2 rounded border border-zinc-700 disabled:opacity-50"
+              >
+                {isGeneratingObject ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              </button>
+            </div>
+           </section>
+
+          {/* Section 4: Manual Controls (REFINED & CLEANED) */}
+          {selectedElement && (
+            <section className="space-y-4 p-5 bg-zinc-900 rounded-xl border border-zinc-800 shadow-sm animate-in fade-in slide-in-from-left-2">
+              <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+                <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100">
+                  <MousePointer2 className="w-4 h-4 text-emerald-400" /> 
+                  Edit {selectedElement.type === 'text' ? 'Text' : selectedElement.type === 'image' ? 'Image' : 'Logo'}
+                </h2>
+                <button 
+                  onClick={handleDeleteSelected}
+                  className="p-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-md transition-colors"
+                  title="Delete Selected Item"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                {/* Position Group */}
+                <div>
+                  <label className="text-[10px] font-bold text-zinc-500 mb-1.5 block uppercase tracking-wider">Position</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 text-xs font-mono">X</span>
+                      <input 
+                        type="number" 
+                        value={Math.round(selectedElement.x)}
+                        onChange={(e) => handleUpdateElement(selectedElement.id, { x: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-7 pr-3 py-2 text-sm focus:ring-1 focus:ring-emerald-500 outline-none text-zinc-300" 
+                      />
+                    </div>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 text-xs font-mono">Y</span>
+                      <input 
+                        type="number" 
+                        value={Math.round(selectedElement.y)}
+                        onChange={(e) => handleUpdateElement(selectedElement.id, { y: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-7 pr-3 py-2 text-sm focus:ring-1 focus:ring-emerald-500 outline-none text-zinc-300" 
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sizing Group */}
+                <div>
+                  <label className="text-[10px] font-bold text-zinc-500 mb-1.5 block uppercase tracking-wider">
+                    {selectedElement.type === 'text' ? 'Typography' : 'Dimensions'}
+                  </label>
+                  <div className="grid grid-cols-1 gap-3">
+                    {(selectedElement.type === 'logo' || selectedElement.type === 'image') && (
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 text-xs font-mono">W</span>
+                        <input 
+                          type="number" 
+                          value={Math.round(selectedElement.width || 100)}
+                          onChange={(e) => handleUpdateElement(selectedElement.id, { width: Number(e.target.value) })}
+                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-7 pr-3 py-2 text-sm focus:ring-1 focus:ring-emerald-500 outline-none text-zinc-300" 
+                        />
+                      </div>
+                    )}
+                    
+                    {selectedElement.type === 'text' && (
+                       <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 text-xs font-mono">Sz</span>
+                        <input 
+                          type="number" 
+                          value={parseInt(selectedElement.style?.fontSize as string || "64")}
+                          onChange={(e) => handleUpdateElement(selectedElement.id, { style: { ...selectedElement.style, fontSize: `${e.target.value}px` } })}
+                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-8 pr-3 py-2 text-sm focus:ring-1 focus:ring-emerald-500 outline-none text-zinc-300" 
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <button 
+                onClick={handleDownloadSelection}
+                className="w-full flex items-center justify-center gap-2 py-2.5 bg-zinc-800 hover:bg-zinc-750 text-emerald-400 border border-zinc-700/50 rounded-lg text-xs font-medium transition-colors mt-2"
+              >
+                <Crop className="w-3.5 h-3.5" /> 
+                Download Isolated PNG
+              </button>
+            </section>
+          )}
 
           {analysisResult && (
             <div className="p-4 bg-emerald-900/20 border border-emerald-800/50 rounded-lg text-sm text-emerald-100">
               <div className="flex items-start gap-2">
                 <CheckCircle2 className="w-4 h-4 mt-0.5 text-emerald-400 shrink-0" />
                 <div>
-                  <p className="font-semibold mb-1">AI Suggestion Applied</p>
+                  <p className="font-semibold mb-1">AI Design Applied</p>
                   <p className="text-emerald-200/80 leading-relaxed text-xs">
                     {analysisResult.fontReasoning}
                   </p>
@@ -427,7 +777,26 @@ const App: React.FC = () => {
             <h3 className="font-medium text-zinc-200 flex items-center gap-2">
               <Move className="w-4 h-4" /> Visual Editor
             </h3>
-            <span className="text-xs text-zinc-500">Drag to move • Drag corner handle to resize</span>
+            <div className="flex items-center gap-2">
+               <button 
+                 onClick={handleUndo} 
+                 disabled={history.length === 0}
+                 className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                 title="Undo"
+               >
+                 <Undo className="w-4 h-4" />
+               </button>
+               <button 
+                 onClick={handleRedo} 
+                 disabled={redoStack.length === 0}
+                 className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                 title="Redo"
+               >
+                 <Redo className="w-4 h-4" />
+               </button>
+               <span className="w-px h-4 bg-zinc-700 mx-1"></span>
+               <span className="text-xs text-zinc-500">Drag to move • Drag handle to resize</span>
+            </div>
           </div>
           
           <CanvasEditor 
@@ -458,19 +827,28 @@ const App: React.FC = () => {
             <div className="flex flex-wrap gap-2 w-full sm:w-auto justify-end">
               <button 
                 onClick={handleDownloadTextOnly}
-                disabled={isDownloading || !elements.some(e => e.type === 'text')}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition-colors border border-zinc-700 text-sm"
-                title="Download text only (Transparent PNG)"
+                disabled={isDownloading || !elements.some(e => e.type === 'text' || e.type === 'image')}
+                className="flex items-center justify-center gap-2 px-3 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition-colors border border-zinc-700 text-xs"
+                title="Download text overlay/art only (Transparent PNG)"
               >
                 <FileType className="w-4 h-4" />
                 <span>Text Only</span>
+              </button>
+
+              <button 
+                onClick={handleDownloadZip}
+                disabled={isDownloading || !bgImage}
+                className="flex items-center justify-center gap-2 px-3 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition-colors border border-zinc-700 text-xs"
+                title="Download ZIP with separate layers"
+              >
+                <Archive className="w-4 h-4" />
+                <span>ZIP</span>
               </button>
               
               <button 
                 onClick={handleShareWhatsApp}
                 disabled={isDownloading || !bgImage}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors shadow-lg shadow-green-900/20 text-sm"
-                title="Share via WhatsApp (Mobile)"
+                className="flex items-center justify-center gap-2 px-3 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg transition-colors shadow-lg shadow-green-900/20 text-xs"
               >
                 <Share2 className="w-4 h-4" />
                 <span>Share</span>

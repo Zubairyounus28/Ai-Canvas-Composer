@@ -42,8 +42,11 @@ export const DraggableElement: React.FC<DraggableElementProps> = ({
 
   // --- Drag Logic ---
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (isResizing) return; // Don't drag if resizing
+    if (isResizing) return;
+    
+    // Crucial: Stop propagation so the canvas click handler doesn't immediately deselect
     e.stopPropagation();
+    
     if (onSelect) onSelect();
     
     if (elementRef.current) {
@@ -85,24 +88,23 @@ export const DraggableElement: React.FC<DraggableElementProps> = ({
       // Dragging
       if (isDragging && elementRef.current) {
         const parentRect = elementRef.current.offsetParent?.getBoundingClientRect();
+        // If no parent rect (e.g. unmounted), stop
         if (!parentRect) return;
 
         let newX = e.clientX - parentRect.left - dragOffset.x;
         let newY = e.clientY - parentRect.top - dragOffset.y;
+        
+        // Update local visual state immediately
         setPosition({ x: newX, y: newY });
       }
 
       // Resizing
       if (isResizing && initialResizeData && elementRef.current) {
         const deltaX = e.clientX - initialResizeData.mouseX;
-        // const deltaY = e.clientY - initialResizeData.mouseY; // We assume uniform scaling based on width
 
-        if (element.type === 'logo') {
+        if (element.type === 'logo' || element.type === 'image') {
           // Resize Image
           const newWidth = Math.max(20, initialResizeData.width + deltaX);
-          // We don't commit immediately to avoid excessive re-renders, but for this demo we'll commit on mouseUp
-          // For visual feedback, we could use a local ref, but let's just use the final update for simplicity.
-          // Actually, to see it resize, we need to update.
            onUpdate(element.id, { width: newWidth });
         } else if (element.type === 'text') {
            // Resize Text (Scale Font Size)
@@ -118,6 +120,7 @@ export const DraggableElement: React.FC<DraggableElementProps> = ({
     const handleMouseUp = () => {
       if (isDragging) {
         setIsDragging(false);
+        // Commit final position to parent state
         onUpdate(element.id, { x: position.x, y: position.y });
       }
       if (isResizing) {
@@ -135,7 +138,14 @@ export const DraggableElement: React.FC<DraggableElementProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, isResizing, dragOffset, initialResizeData, element.id, onUpdate, element.type]);
+  }, [isDragging, isResizing, dragOffset, initialResizeData, element.id, onUpdate, element.type, position.x, position.y]);
+
+  // Clean styles to avoid positioning conflicts
+  const cleanStyle = element.style ? { ...element.style } : {};
+  delete cleanStyle.position;
+  delete cleanStyle.top;
+  delete cleanStyle.left;
+  delete cleanStyle.transform;
 
   return (
     <div
@@ -146,37 +156,36 @@ export const DraggableElement: React.FC<DraggableElementProps> = ({
         top: position.y,
         cursor: isDragging ? 'grabbing' : 'grab',
         zIndex: isSelected ? 50 : 10,
-        userSelect: 'none',
         touchAction: 'none',
-        width: element.type === 'logo' ? element.width : 'auto', // Important for image resizing
+        width: (element.type === 'logo' || element.type === 'image') ? element.width : 'auto',
       }}
-      className={`group ${isSelected ? 'ring-1 ring-blue-500 ring-offset-1 ring-offset-transparent' : 'hover:ring-1 hover:ring-zinc-400 hover:ring-dashed'}`}
+      className={`group select-none ${isSelected ? 'ring-1 ring-blue-500 ring-offset-1 ring-offset-transparent' : 'hover:ring-1 hover:ring-zinc-400 hover:ring-dashed'}`}
       onMouseDown={handleMouseDown}
     >
       {/* Content */}
       {element.type === 'text' ? (
-        <div style={element.style} className="whitespace-pre-wrap p-2 leading-tight">
+        <div style={cleanStyle} className="whitespace-pre-wrap p-2 leading-tight pointer-events-none">
           {element.content}
         </div>
       ) : (
         <img
           src={element.content}
-          alt="Logo"
-          className="pointer-events-none select-none w-full h-auto"
+          alt={element.type}
+          className="pointer-events-none w-full h-auto block"
         />
       )}
 
       {/* Resize Anchors (Only when selected) */}
       {isSelected && (
         <>
-          {/* Bottom Right Anchor - The standard resize handle */}
+          {/* Bottom Right Anchor */}
           <div
             className="absolute -bottom-1.5 -right-1.5 w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-nwse-resize z-50 shadow-sm hover:scale-110 transition-transform"
             onMouseDown={handleResizeStart}
           />
           {/* Helper label */}
           <div className="absolute -top-6 left-0 bg-blue-600 text-white text-[10px] px-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
-            {element.type === 'text' ? 'Drag corner to resize text' : 'Drag to resize'}
+            Drag to resize
           </div>
         </>
       )}
